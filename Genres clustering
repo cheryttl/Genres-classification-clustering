@@ -1,0 +1,450 @@
+!pip install hdbscan
+import pandas as pd
+import re
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+from sklearn.metrics import silhouette_score
+from mpl_toolkits.mplot3d import Axes3D
+import nltk
+nltk.download('stopwords')
+nltk.download('punkt')
+from nltk.corpus import stopwords
+import spacy
+nlp = spacy.load("en_core_web_sm")
+from google.colab import drive
+drive.mount('/content/drive')
+import plotly.express as px
+import hdbscan
+import umap.umap_ as umap
+
+# Загружаем датасет
+data_path = '/content/drive/MyDrive/ml_database/wiki_movie_plots_deduped.csv'
+df = pd.read_csv(data_path)
+
+# Удаляем строки с неизвестным жанром
+df = df[df['Genre'] != 'unknown']
+
+# Сохраняем только столбцы 'Genre' и 'Plot'
+df = df[['Genre', 'Plot']]
+
+# Функция балансировки
+def balance_dataframe_by_genre(df, max_per_genre):
+    balanced_df = pd.DataFrame()
+    for genre in df['Genre'].unique():
+        genre_df = df[df['Genre'] == genre].sample(min(max_per_genre, len(df[df['Genre'] == genre])), random_state=42)
+        balanced_df = pd.concat([balanced_df, genre_df], ignore_index=True)
+    return balanced_df
+
+
+# Фильтрация и балансировка
+counts = df['Genre'].value_counts()
+filtered_counts = counts[counts >= 1000]
+columns_to_keep = ['Genre', 'Plot']
+df = df[columns_to_keep]
+df = df[df['Genre'].isin(filtered_counts.index)]
+balanced_df = balance_dataframe_by_genre(df, max_per_genre=1000)
+
+# Предобработка текста
+stop_words = set(stopwords.words('english'))
+
+def preprocess_text_lemmatize(text):
+    text = re.sub(r'[^\w\s]', '', text)  # Удаление знаков препинания
+    text = re.sub(r'\d+', '', text)       # Удаление цифр
+    doc = nlp(text.lower())              # Лемматизация
+    return " ".join([token.lemma_ for token in doc if not token.is_stop and not token.is_punct])
+
+balanced_df['Plot'] = balanced_df['Plot'].apply(preprocess_text_lemmatize)
+
+texts = balanced_df['Plot'].tolist()
+labels = balanced_df['Genre'].tolist()
+
+# Сохранение сбалансированного датасета
+balanced_df.to_csv('balanced_dataset.csv', index=False)
+print(balanced_df)
+
+--------------------------TFIDF-------------------------
+
+tfidf_vectorizer = TfidfVectorizer(
+    max_features=5000,
+    min_df=5,
+    max_df=0.7,
+    ngram_range=(1, 2),
+    stop_words='english'
+)
+
+tfidf_matrix = tfidf_vectorizer.fit_transform(balanced_df['Plot'])
+
+# Создаем фигуру с настроенным фоном
+fig = plt.figure(figsize=(10,5), facecolor='#97CDEC')  # Цвет фона всей картинки
+ax = fig.add_subplot(facecolor='#ccccff')  # Цвет фона области графика
+
+# Рисуем график
+ax.plot(range(2,15), silhouette_scores,
+        marker='o',
+        color='#cc99ff',
+        markerfacecolor='#b266ff',
+        markersize=10,
+        linewidth=3)
+
+# Настройки осей и текста
+ax.set_xlabel('Число кластеров', fontsize=12, color='#ffffff')
+ax.set_ylabel('Силуэтный коэффициент', fontsize=12, color='#ffffff')
+
+
+# Настройка сетки
+ax.grid(True, linestyle='--', linewidth=0.7, alpha=0.7, color='#ffffff')
+
+# Убираем лишние границы
+for spine in ['top', 'right']:
+    ax.spines[spine].set_visible(False)
+
+for spine in ['left', 'bottom']:
+    ax.spines[spine].set_color('#ffffff')
+
+# Настраиваем цвета меток
+ax.tick_params(axis='both', colors='#ffffff')
+
+plt.show()
+
+optimal_clusters = 4 # Пример значения на основе анализа
+kmeans = KMeans(n_clusters=optimal_clusters, random_state=42)
+clusters = kmeans.fit_predict(tfidf_matrix)
+
+# Добавляем кластеры в DataFrame
+balanced_df['Cluster'] = clusters
+
+# Стиль фона и цветовая палитра
+custom_colors = px.colors.sequential.Plotly3  # Альтернатива: Icefire, Cividis
+background_color = '#97CDEC'  # Светло-розовый фон
+
+fig = px.scatter(
+    balanced_df,
+    x='PCA1',
+    y='PCA2',
+
+    color='Cluster',
+    hover_data=['Genre'],
+    color_continuous_scale=px.colors.sequential.Plotly3,  # Розово-фиолетово-голубой градиент
+    template='plotly_white'  # Базовый шаблон
+)
+
+# Кастомизация фона и стилей
+fig.update_layout(
+    plot_bgcolor='#ccccff',  # Полупрозрачный розовый фон области графика
+    paper_bgcolor=background_color,  # Основной фон
+    title_font=dict(color='#ffffff'),  # Фиолетовый заголовок
+    hoverlabel=dict(
+        bgcolor='#e5ccff',  # Фиолетовый фон подсказок
+        font_size=12
+    )
+)
+
+# Настройка маркеров
+fig.update_traces(
+    marker=dict(
+        size=8,
+        line=dict(width=1, color='#3a0ca3')  # Темно-синяя граница точек
+    ),
+    selector=dict(mode='markers')
+)
+
+# Альтернативная палитра (если Plotly3 не подходит)
+# fig.update_traces(marker_colorscale=px.colors.diverging.Tealrose)
+
+fig.show()
+
+# Силуэтный коэффициент
+print(f"Silhouette Score: {silhouette_score(tfidf_matrix, clusters):.2f}")
+
+# Сравнение с исходными жанрами
+cross_tab = pd.crosstab(balanced_df['Cluster'], balanced_df['Genre'])
+print("\nCross-tabulation with original genres:")
+print(cross_tab)
+
+-----------------------Sentence Transformer---------------------
+# Загрузка сбалансированного датасета
+try:
+    df = pd.read_csv('balanced_dataset.csv')
+except FileNotFoundError:
+    print("Файл 'balanced_dataset.csv' не найден. Убедитесь, что файл существует и путь указан правильно.")
+    exit()
+df['Plot_with_genre'] = df['Genre'] + ' ' + df['Plot'] #новый столбец, объединяющий информацию (для того, чтобы учитывать жанр при генерации эмбеддингов)
+
+# Генерация эмбеддингов с учетом жанра
+model = SentenceTransformer('all-MiniLM-L12-v2') #модель, эффективная в обработке предложений
+embeddings = model.encode(df['Plot_with_genre'].tolist(), show_progress_bar=True) #текст в числовые векторы для понимания взаимосвязи
+
+embeddings_norm = normalize(embeddings)
+
+----------------K-means-----------------------------
+from sklearn.preprocessing import normalize
+def greedy_kmeans_plus_plus_init(X, n_clusters, n_candidates=10, random_state=54):
+    rng = np.random.default_rng(random_state)
+    n_samples = X.shape[0]
+    centers = []
+
+    # Выбираем первый центр случайно
+    first_center_idx = rng.integers(n_samples)
+    centers.append(X[first_center_idx])
+
+    for _ in range(1, n_clusters):
+        # Вычисляем расстояния до ближайшего центра
+        dist_sq = np.min(np.array([np.sum((X - center) ** 2, axis=1) for center in centers]), axis=0)
+
+        # Выбираем кандидатов с вероятностью пропорциональной dist_sq
+        probabilities = dist_sq / dist_sq.sum()
+        candidate_indices = rng.choice(n_samples, size=n_candidates, replace=False, p=probabilities)
+
+        # Из кандидатов выбираем тот, который минимизирует суммарное отклонение
+        best_candidate = None
+        best_potential = np.inf
+        for idx in candidate_indices:
+            potential_centers = centers + [X[idx]]
+            dist_sq_candidate = np.min(np.array([np.sum((X - center) ** 2, axis=1) for center in potential_centers]), axis=0)
+            potential = dist_sq_candidate.sum()
+            if potential < best_potential:
+                best_potential = potential
+                best_candidate = X[idx]
+
+        centers.append(best_candidate)
+
+    return np.array(centers)
+
+# Создаем фигуру с настроенным фоном
+fig = plt.figure(figsize=(10,5), facecolor='#97CDEC')  # Голубой фон
+ax = fig.add_subplot(facecolor='#ccccff')  # Сиреневый фон области графика
+
+# Рисуем график с кастомными цветами
+ax.plot(range(2,11), silhouette_scores,
+        marker='o',
+        color='#cc99ff',
+        markerfacecolor='#b266ff',
+        markersize=10,
+        linewidth=3,
+        markeredgecolor='#3a0ca3')
+
+# Настройки осей и текста
+ax.set_xlabel('Число кластеров', fontsize=12, color='#7e03a8')  # Фиолетовый текст
+ax.set_ylabel('Силуэтный коэффициент', fontsize=12, color='#7e03a8')
+
+
+# Настройка сетки
+ax.grid(True, linestyle='--', linewidth=0.7, alpha=0.7, color='#3a0ca3')
+
+# Убираем лишние границы
+for spine in ['top', 'right']:
+    ax.spines[spine].set_visible(False)
+
+for spine in ['left', 'bottom']:
+    ax.spines[spine].set_color('#3a0ca3')  # Фиолетовые границы
+
+# Настраиваем цвета меток
+ax.tick_params(axis='both', colors='#7e03a8')
+
+# Добавляем аннотацию для оптимального k
+best_k = k_range[np.argmax(silhouette_scores)]
+ax.annotate(f'Оптимальное K={best_k}',
+            xy=(best_k, max(silhouette_scores)),
+            xytext=(best_k+0.5, max(silhouette_scores)-0.05),
+            arrowprops=dict(facecolor='#3a0ca3', arrowstyle='->'),
+            fontsize=12, color='#7e03a8')
+
+# Добавляем горизонтальную линию максимума
+ax.axhline(y=max(silhouette_scores), color='#3a0ca3', linestyle=':', alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+
+# Нормализация эмбеддингов
+embeddings_norm = normalize(embeddings)
+
+# Получаем центры с помощью Greedy K-Means++
+init_centers = greedy_kmeans_plus_plus_init(embeddings_norm, n_clusters=5, n_candidates=10, random_state=42)
+
+# Кластеризация K-means с пользовательской инициализацией
+kmeans = KMeans(n_clusters=5, init=init_centers, n_init=1, random_state=42)
+df['Cluster'] = kmeans.fit_predict(embeddings_norm)
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.corpus import stopwords
+import nltk
+
+# Загрузка стоп-слов для нужного языка
+nltk.download('stopwords')
+stop_words = list(stopwords.words('english'))  # Или 'english'
+
+for cluster_id in range(kmeans.n_clusters):
+    cluster_texts = df[df['Cluster'] == cluster_id]['Plot']  # Замените 'text_column' на реальное название
+
+    # Защита от пустых значений
+    cluster_texts = cluster_texts.fillna('')
+
+    # Инициализация TF-IDF с корректными стоп-словами
+    tfidf = TfidfVectorizer(
+        max_features=10,
+        stop_words=stop_words,  # Теперь передаем список, а не множество
+        ngram_range=(1, 2)
+    )
+
+    tfidf_matrix = tfidf.fit_transform(cluster_texts)
+    feature_names = tfidf.get_feature_names_out()
+
+    print(f"\nКластер {cluster_id}:")
+    print(", ".join(feature_names[:10]))
+
+-------------------визуализация-------------------
+# Снижение размерности с помощью PCA
+pca = PCA(n_components=2, random_state=42)
+embedding_2d = pca.fit_transform(embeddings_norm)
+df['PCA1'] = embedding_2d[:, 0]
+df['PCA2'] = embedding_2d[:, 1]
+
+# Стиль фона и цветовая палитра
+custom_colors = px.colors.sequential.Plotly3
+background_color = '#97CDEC'
+
+fig = px.scatter(
+    df,
+    x='PCA1',
+    y='PCA2',
+    color='Cluster',
+    hover_data=['Genre'],
+    title='Кластеры с центроидами (PCA)',
+    color_continuous_scale=custom_colors,
+    template='plotly_white',
+    width=800,
+    height=500
+)
+
+# Кастомизация стилей
+fig.update_layout(
+    plot_bgcolor='#ffffff',
+    paper_bgcolor=background_color,
+    title_font=dict(color='#7e03a8', size=24),
+    hoverlabel=dict(
+        bgcolor='#e5ccff',
+        font_size=12,
+        font_family="Arial"
+    ),
+    legend=dict(
+        title_font=dict(color='#3a0ca3'),
+        font=dict(size=12)
+    )
+)
+
+fig.show()
+
+# Строим кросс-таблицу с абсолютными значениями
+cross_tab = pd.crosstab(
+    index=df['Cluster'],
+    columns=df['Genre'],
+    margins=False
+).sort_index()
+
+# Нормализованная кросс-таблица (проценты с округлением до сотых)
+cross_tab_norm = pd.crosstab(
+    index=df['Cluster'],
+    columns=df['Genre'],
+    normalize='index'
+).round(2) * 100  # Округление до 4 знаков перед умножением для точности
+
+# Форматируем вывод с двумя знаками после запятой
+# Комбинированный вывод
+print("\nCross-tabulation with original genres:")
+print("Абсолютные значения:")
+print(cross_tab)
+print("\nПроцентное соотношение:")
+print(cross_tab_norm.applymap(lambda x: f"{x:.1f}"))
+
+-------------------------fuzzy C-means--------------------
+!pip install scikit-fuzzy
+import skfuzzy as fuzz
+
+# Fuzzy C-means кластеризация
+n_clusters = 4
+data = embeddings_norm.T  # Транспонируем для skfuzzy (фичи x сэмплы)
+
+cntr, u, u0, d, jm, p, fpc = fuzz.cluster.cmeans(
+    data,
+    n_clusters,
+    m=1.5,
+    error=0.005,
+    maxiter=300,
+    init=None
+)
+
+# Сохраняем результаты
+df['Cluster'] = np.argmax(u, axis=0)
+for i in range(n_clusters):
+    df[f'Cluster_{i}_membership'] = u[i]
+# PCA визуализация
+pca = PCA(n_components=2, random_state=42)
+embedding_2d = pca.fit_transform(embeddings_norm)
+df['PCA1'] = embedding_2d[:, 0]
+df['PCA2'] = embedding_2d[:, 1]
+
+# Настройка стилей
+custom_colors = px.colors.sequential.Plotly3
+background_color = '#97CDEC'
+
+# Интерактивная визуализация
+fig = px.scatter(
+    df,
+    x='PCA1',
+    y='PCA2',
+    color='Cluster',
+    hover_data=['Genre'] + [f'Cluster_{i}_membership' for i in range(n_clusters)],
+    title='Fuzzy C-means кластеризация текстов',
+    color_continuous_scale=custom_colors,
+    template='plotly_white',
+    width=800,
+    height=500
+)
+
+fig.update_layout(
+    plot_bgcolor='#ffffff',
+    paper_bgcolor=background_color,
+    title_font=dict(color='#7e03a8', size=24),
+    hoverlabel=dict(
+        bgcolor='#e5ccff',
+        font_size=12,
+        font_family="Arial"
+    )
+)
+
+fig.show()
+
+# Анализ распределения жанров
+print("\nВзвешенное распределение жанров по кластерам:")
+for cluster in range(n_clusters):
+    cluster_data = df[df['Cluster'] == cluster]
+    total_membership = cluster_data[f'Cluster_{cluster}_membership'].sum()
+
+    print(f"\nКластер {cluster} (размер: {len(cluster_data)}):")
+    for genre in df['Genre'].unique():
+        genre_membership = cluster_data.loc[
+            cluster_data['Genre'] == genre,
+            f'Cluster_{cluster}_membership'
+        ].sum()
+        print(f"{genre}: {genre_membership/total_membership:.1%}")
+
+# Кросс-таблица с абсолютными значениями
+print("\nCross-tabulation с основными кластерами:")
+cross_tab = pd.crosstab(
+    index=df['Cluster'],
+    columns=df['Genre'],
+    margins=False
+)
+print(cross_tab)
+
+# Находим объекты с нечеткой принадлежностью
+df['Max_Membership'] = u.max(axis=0)
+border_objects = df[df['Max_Membership'] < 0.7]  # Порог нечеткости
+
+print(f"\nПограничные объекты ({len(border_objects)} шт.):")
+print(border_objects[['Genre', 'Cluster', 'Max_Membership']].sample(5, random_state=42))
+
