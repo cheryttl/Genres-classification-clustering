@@ -1,0 +1,185 @@
+pip install spacy
+!python -m spacy download en_core_web_sm
+import re
+import pandas as pd
+import numpy as np
+from google.colab import drive
+from sklearn.model_selection import train_test_split
+from tensorflow import keras
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Bidirectional, Dropout, Conv1D, MaxPooling1D, Lambda, RepeatVector, Permute, Multiply, Flatten, Reshape
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
+from sklearn.metrics import classification_report, accuracy_score, f1_score, precision_score, recall_score
+import nltk
+nltk.download('stopwords')
+nltk.download('punkt')
+from nltk.corpus import stopwords
+from sklearn.preprocessing import LabelEncoder
+import tensorflow as tf
+import spacy
+nlp = spacy.load("en_core_web_sm")
+drive.mount('/content/drive')
+
+# Загружаем датасет
+data_path = '/content/drive/MyDrive/ml_database/wiki_movie_plots_deduped.csv'
+df = pd.read_csv(data_path)
+
+# Удаляем строки с неизвестным жанром
+df = df[df['Genre'] != 'unknown']
+print(df)
+# Функция балансировки (должна быть определена ранее)
+def balance_dataframe_by_genre(df, max_per_genre):
+    balanced_df = pd.DataFrame()
+    for genre in df['Genre'].unique():
+        genre_df = df[df['Genre'] == genre].sample(min(max_per_genre, len(df[df['Genre'] == genre])), random_state=42)
+        balanced_df = pd.concat([balanced_df, genre_df], ignore_index=True)
+    return balanced_df
+
+
+# Фильтрация и балансировка
+counts = df['Genre'].value_counts()
+filtered_counts = counts[counts >= 1000]
+columns_to_keep = ['Genre', 'Plot'] # Укажите нужные столбцы
+df = df[columns_to_keep]
+df = df[df['Genre'].isin(filtered_counts.index)]
+balanced_df = balance_dataframe_by_genre(df, max_per_genre=1000)
+
+# Сохранение сбалансированного датасета (опционально)
+balanced_df.to_csv('balanced_dataset.csv', index=False)
+# Предобработка текста
+stop_words = set(stopwords.words('english'))
+
+def preprocess_text_lemmatize(text):
+    text = re.sub(r'[^\w\s]', '', text)  # Удаление знаков препинания
+    text = re.sub(r'\d+', '', text)       # Удаление цифр
+    doc = nlp(text.lower())              # Лемматизация
+    return " ".join([token.lemma_ for token in doc if not token.is_stop and not token.is_punct])
+
+balanced_df['Plot'] = balanced_df['Plot'].apply(preprocess_text_lemmatize)
+
+texts = balanced_df['Plot'].tolist()
+labels = balanced_df['Genre'].tolist()
+
+# Токенизация и паддинг
+max_words = 20000  # Увеличен размер словаря
+max_len = 500    # Увеличена максимальная длина последовательности
+tokenizer = Tokenizer(num_words=max_words, oov_token="<UNK>")
+tokenizer.fit_on_texts(texts)
+sequences = tokenizer.texts_to_sequences(texts)
+padded_sequences = pad_sequences(sequences, maxlen=max_len)
+
+le = LabelEncoder()
+labels_encoded = le.fit_transform(labels)
+num_classes = len(le.classes_)
+
+from sentence_transformers import SentenceTransformer
+# После предобработки текста (lemmatize и очистка)
+texts = balanced_df['Plot'].tolist()
+labels = balanced_df['Genre'].tolist()
+
+# Кодируем метки
+le = LabelEncoder()
+labels_encoded = le.fit_transform(labels)
+num_classes = len(le.classes_)
+
+# Делим данные
+X_train_texts, X_test_texts, y_train, y_test = train_test_split(
+    texts, labels_encoded, test_size=0.2, random_state=42, stratify=labels_encoded)
+
+# --- Генерация эмбеддингов с помощью SentenceTransformer ---
+model_st = SentenceTransformer('all-MiniLM-L6-v2')
+
+print("Генерация эмбеддингов для обучающего набора...")
+embeddings_train = model_st.encode(X_train_texts, batch_size=16, show_progress_bar=True)
+
+print("Генерация эмбеддингов для тестового набора...")
+embeddings_test = model_st.encode(X_test_texts, batch_size=16, show_progress_bar=True)
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+
+embedding_dim = embeddings_train.shape[1]
+
+model = Sequential()
+model.add(Dense(256, activation='relu', input_shape=(embedding_dim,)))
+model.add(BatchNormalization())
+model.add(Dropout(0.5))
+model.add(Dense(128, activation='relu'))
+model.add(Dropout(0.5))
+model.add(Dense(num_classes, activation='softmax'))
+
+model.compile(loss='sparse_categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+# Callbacks
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=3, min_lr=1e-6)
+
+# Обучение
+batch_size = 16
+history = model.fit(embeddings_train, y_train, epochs=50, batch_size=batch_size,
+                    validation_data=(embeddings_test, y_test), callbacks=[early_stopping, reduce_lr])
+
+# Оценка
+loss, accuracy = model.evaluate(embeddings_test, y_test)
+print(f"Точность на тестовом наборе: {accuracy:.4f}")
+
+y_pred = model.predict(embeddings_test)
+y_pred_classes = np.argmax(y_pred, axis=1)
+
+from sklearn.metrics import classification_report, accuracy_score, f1_score, precision_score, recall_score
+
+accuracy = accuracy_score(y_test, y_pred_classes)
+f1 = f1_score(y_test, y_pred_classes, average='weighted')
+precision = precision_score(y_test, y_pred_classes, average='weighted')
+recall = recall_score(y_test, y_pred_classes, average='weighted')
+
+print(f"Accuracy: {accuracy:.4f}")
+print(f"F1-score: {f1:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+
+print(classification_report(y_test, y_pred_classes, target_names=le.classes_))
+
+model.save('model.h5')
+with open('tokenizer.pickle', 'wb') as handle:
+    pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
+with open('label_encoder.pickle', 'wb') as handle:
+    pickle.dump(le, handle, protocol=pickle.HIGHEST_PROTOCOL)
+test_data_path = '/content/drive/MyDrive/ml_database/testdata.csv' # ИЗМЕНИТЕ ПУТЬ
+test_df = pd.read_csv(test_data_path)
+
+# Загрузка сохраненных объектов
+model = keras.models.load_model('model.h5')
+with open('tokenizer.pickle', 'rb') as f:
+    tokenizer = pickle.load(f)
+with open('label_encoder.pickle', 'rb') as f:
+    le = pickle.load(f)
+
+
+
+# Загрузите модель SentenceTransformer (ту же, что использовали при обучении)
+model_st = SentenceTransformer('all-MiniLM-L6-v2')
+
+def preprocess_text_for_prediction(text_series, model_st):
+    processed_texts = text_series.str.lower().apply(preprocess_text_lemmatize)
+    embeddings = model_st.encode(processed_texts.tolist(), batch_size=64, show_progress_bar=False)
+    return embeddings
+
+embeddings_test = preprocess_text_for_prediction(test_df['Plot_test'], model_st)
+
+predictions = model.predict(embeddings_test)
+
+predicted_genres = [le.inverse_transform([np.argmax(pred)])[0] for pred in predictions]
+predicted_probabilities = [np.max(pred) for pred in predictions]
+
+print("\nРезультаты предсказания на тестовом датасете:")
+for i in range(len(test_df)):
+    print("-" * 20)
+    print(f"Предсказанный жанр: {predicted_genres[i]}, Уверенность: {predicted_probabilities[i]:.2%}")
+    print(f"Реальный жанр: {test_df['Genre_test'].iloc[i]}")
+    print("-" * 20)
+
+
